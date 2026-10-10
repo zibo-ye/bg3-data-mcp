@@ -1,7 +1,13 @@
 # Native request investigation
 
 Evidence is from pinned BG3SE source `45f32c1a1fc10b08a962f0463bb5f2cd0cb9cc76`.
-This is an offline code audit, not evidence of runtime compatibility with the installed loader.
+The source audit is supplemented by the limited live observations below; request submission remains unvalidated.
+
+## Live inspection — 2026-10-10
+
+Independent balanced tutorial campaign, BG3 DX11 4.1.1.7631656 / SE 32. Protected system lookups confirm ServerCastRequest, ServerTurnOrder and ServerSightViewshed plus network/command cast and EndTurn arrays. Idle actor StartRequests was absent. A read-only OnSystemUpdate hook captured an ordinary UI Hide cast by recruited host-owned, non-avatar Lae'zel in NetworkStartRequests. The action resource decreased 1 to 0 and CastedSpell was observed.
+
+The request used Shout_Hide in Prototype and OriginatorPrototype; SourceType SpellSet; Source and ProgressionSource zero GUIDs; caster self-target with TargetingType Shout; Immediate and FromClient flags; empty NetGuid; generated RequestGuid; default originator metadata. No queue was modified. This example does not establish the proper metadata for other spells, submission legality or multiplayer authority. Local runtime evidence is retained by the consuming project's ignored artifacts/live directory, with findings in docs/LIVE_SESSION.md.
 
 ## Confirmed exposure in source
 

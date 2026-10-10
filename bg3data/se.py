@@ -287,7 +287,9 @@ def eval_lua(code, context="server", timeout=15.0, want_output=False):
             f'pcall(Ext.IO.SaveFile, "{RPC_DIR}/"..__t..".txt", (__ok and "OK" or "ERR").."|"..__s)'
         )
         offset = os.path.getsize(log)
-        _inject([context, chunk], pid)
+        # ConsoleThread consumes input until the first Return before InputLoop
+        # accepts context commands. An empty line is harmless once already in it.
+        _inject(["", context, chunk], pid)
         deadline = time.time() + timeout
         while not want_output and time.time() < deadline:
             if os.path.exists(rpc):
@@ -329,10 +331,12 @@ def command(line, wait=3.0, context="server"):
     """Send one raw console line (e.g. '!apofeature X') and return the log lines it produced."""
     if "\n" in line or "\r" in line:
         raise ValueError("one console line at a time")
+    if context not in ("server", "client"):
+        raise ValueError("context must be 'server' or 'client'")
     with _console_guard():
         (pid, _, _), log = _preflight()
         offset = os.path.getsize(log)
-        _inject([context, line], pid)
+        _inject(["", context, line], pid)
         time.sleep(max(0.5, min(wait, 60)))
         return [l for l in _read_from(log, offset).splitlines() if l.strip()]
 

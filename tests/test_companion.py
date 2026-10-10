@@ -3,12 +3,73 @@ import copy
 import tempfile
 import threading
 import unittest
+import contextlib
+import json
+import re
+from unittest.mock import patch
 from pathlib import Path
 
 from bg3data.companion.native import NativeBackend
 from bg3data.companion.protocol import Rejected, action, observation
 from bg3data.companion.service import CompanionService
 from bg3data.companion.simulation import ACTOR, CHEST, ENEMY, FRIEND, HIDDEN, HOST, SimulationBackend, fixture
+
+
+class ConsoleStartupTests(unittest.TestCase):
+    """Model the official console's Return gate, not a running game."""
+
+    def test_eval_reaches_requested_context_from_fresh_and_active_console(self):
+        from bg3data import se
+        for active in (False, True):
+            for requested in ("server", "client"):
+                with self.subTest(active=active, context=requested), tempfile.TemporaryDirectory() as root:
+                    log = Path(root) / "runtime.log"
+                    log.write_text("")
+                    state = {"active": active, "context": "client" if active else "server"}
+
+                    def inject(lines, pid):
+                        for line in lines:
+                            if not state["active"]:
+                                state["active"] = True  # first Return consumes its line
+                            elif line in ("server", "client"):
+                                state["context"] = line
+                            elif line:
+                                tag = re.search(r'local __t="([a-f0-9]+)"', line).group(1)
+                                rpc = Path(root) / se.RPC_DIR / (tag + ".txt")
+                                rpc.parent.mkdir(exist_ok=True)
+                                rpc.write_text('OK|' + json.dumps({"r": state["context"]}))
+
+                    with patch.object(se, "_console_guard", contextlib.nullcontext), \
+                         patch.object(se, "_preflight", return_value=((123, "bg3", 0), str(log))), \
+                         patch.object(se, "_io_root", return_value=root), \
+                         patch.object(se, "_inject", side_effect=inject):
+                        result = se.eval_lua("return 'context probe'", requested)
+                    self.assertEqual({"ok": True, "result": requested, "output": []}, result)
+
+    def test_command_enters_console_before_context_and_rejects_invalid_context(self):
+        from bg3data import se
+        executed = []
+        state = {"active": False, "context": "server"}
+
+        def inject(lines, pid):
+            for line in lines:
+                if not state["active"]:
+                    state["active"] = True
+                elif line in ("client", "server"):
+                    state["context"] = line
+                elif line:
+                    executed.append((state["context"], line))
+
+        with tempfile.TemporaryDirectory() as root:
+            log = Path(root) / "runtime.log"
+            log.write_text("")
+            with patch.object(se, "_console_guard", contextlib.nullcontext), \
+                 patch.object(se, "_preflight", return_value=((123, "bg3", 0), str(log))), \
+                 patch.object(se, "_inject", side_effect=inject), patch.object(se.time, "sleep"):
+                se.command("return 42", context="client")
+                with self.assertRaises(ValueError):
+                    se.command("return 42", context="invalid")
+        self.assertEqual([("client", "return 42")], executed)
 
 
 class CompanionTests(unittest.TestCase):

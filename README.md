@@ -1,5 +1,15 @@
 # bg3-data-mcp
 
+## Companion API development fork
+
+This fork extends [holypolarpanda7/bg3-data-mcp](https://github.com/holypolarpanda7/bg3-data-mcp)
+on branch `companion-api`, starting at `def2602cfa31fea45ce5109cc6ff459688947634`.
+The goal is structured observations and normal-rules game actions for an agent controlling
+the fourth companion in a three-player party. **Native companion actions are not implemented or
+validated yet.** Existing tools remain modding/development tools, including unrestricted Lua execution;
+they are not a restricted companion action interface. See [the development plan](docs/COMPANION_API.md).
+
+
 An MCP server (and CLI) for **Baldur's Gate 3 modding**: layered game-data lookup, static checks that catch
 what the engine silently ignores, in-game testing through Script Extender, and export to the Larian Toolkit
 for mod.io publishing. Works natively on Windows or under WSL, finds the game and tools itself, and isn't

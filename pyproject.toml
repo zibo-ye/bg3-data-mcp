@@ -10,6 +10,7 @@ dependencies = ["mcp>=2.2,<3", "pillow>=11.2", "numpy>=1.26"]
 [project.scripts]
 bg3-data-mcp = "bg3data.server:main"
 bg3-data = "bg3data.cli:main"
+bg3-companion-api-mcp = "bg3data.companion.server:main"
 
 [build-system]
 requires = ["hatchling"]

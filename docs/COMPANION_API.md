@@ -10,11 +10,12 @@ This fork owns game-facing data and action transport. The consuming companion pr
 agent prompts, planning, policy, configuration and the bounded decision loop. Avoid moving
 model-provider code into the data server. Upstream lookup, indexing and SE transport remain reusable.
 
-The fork currently changes documentation only. There are no new callable companion tools or
-validated native actions. Existing SE eval and development/test tools can alter the game and
-must not be treated as a restricted autonomous companion interface.
+The fork implements the contracts, service, SQLite journal, restricted MCP server and offline
+simulation under `bg3data/companion/`. Native execution is unavailable; a read-only SE adapter
+and presence probe are prepared but not validated in game. Existing SE eval and development/test
+tools can alter the game and must not be treated as a restricted autonomous companion interface.
 
-## Proposed tool boundary (not implemented)
+## Implemented tool boundary
 
 - `bg3_companion_capabilities`: report implemented actions, backend and validation status;
   distinguish backend availability from whether an action is currently legal.
@@ -26,6 +27,44 @@ must not be treated as a restricted autonomous companion interface.
   No screen coordinates or hotbar mapping in the API contract.
 - `bg3_companion_result`: request ID and status (`pending`, `completed`, `rejected`, `uncertain`),
   rejection reason and correlated game events/state changes. Uncertain requests cannot be blindly retried.
+- `bg3_companion_status`, `bg3_companion_bind`, `bg3_companion_control`, `bg3_companion_preview`:
+  binding, explicit enable/pause, unresolved-request reporting and non-submitting validation.
+- `bg3_companion_reconcile`: explicitly query late correlated evidence for an uncertain request.
+  Never resends and does not re-enable control.
+
+The companion server exposes only these nine tools. Native capabilities are static and do not contact
+the game. Native observation/binding does execute read-only Lua; do not run it while live testing is deferred.
+
+```sh
+python -m bg3data.companion.server --simulation
+python -m unittest discover -s tests -p test_companion.py
+```
+
+`--journal PATH` enables persistent SQLite receipts in simulation. The native server uses a durable
+per-user cache by default; the consumer may supply its own project-local journal. A request is reserved
+before transport submission. Restarted pending requests become uncertain when queried; reuse of the
+same client ID retrieves the receipt, never executes again. Uncertain rows continue blocking new actions
+even after rebinding. Correlated terminal evidence can settle them through explicit reconciliation.
+
+Actions (exact fields; extras are rejected):
+
+```json
+{"kind":"cast","spell_id":"Target_HealingWord","target_uuid":"00000000-0000-0000-0000-000000000003"}
+{"kind":"cast","spell_id":"Projectile_Fireball","position":{"x":4,"y":0,"z":0}}
+{"kind":"move","position":{"x":3,"y":0,"z":0}}
+{"kind":"end_turn"}
+{"kind":"react","reaction_id":"pending_reaction_id","accept":true}
+{"kind":"follow","leader_uuid":"00000000-0000-0000-0000-000000000001","distance":2}
+{"kind":"interact","target_uuid":"00000000-0000-0000-0000-000000000006"}
+```
+
+All six are supported only by the simulation fixture. Simulation uses a bounded same-height integer
+grid and a few deterministic spell definitions, not BG3's complete pathfinding, physics or D&D rules.
+Its checks establish service behavior and scenario expectations, not native compatibility.
+
+Public observations whitelist fields. Nonparty entities require explicit visibility evidence, and their
+private resources/spellbooks are removed. The current native adapter withholds all nonparty entities
+until visibility semantics are verified. It does not expose pending reactions or interactables yet.
 
 Requests must be limited to the bound host-owned companion, require fresh observations and respect
 the game's authority and turn state. Native actions must not require selecting the companion in
@@ -37,7 +76,9 @@ not invented assumptions.
 The pinned SE source exposes `CastStartRequest`, `CastRequestsComponent.StartRequests` and
 `CastRequestSystem` queues including `NetworkStartRequests` and `CommandProtocolStartRequests`:
 [source](https://github.com/Norbyte/bg3se/blob/45f32c1a1fc10b08a962f0463bb5f2cd0cb9cc76/BG3Extender/GameDefinitions/Components/SpellCast.h).
-These are reflected C++ structures, not a demonstrated callable Lua action API. Determine which
+`Ext.System` is registered by the Lua system proxy, and the array proxy supports append-by-index
+for default-constructible element types. [NATIVE_REQUESTS.md](NATIVE_REQUESTS.md) records exact evidence.
+These are reflected C++ structures, not a demonstrated callable normal-rules action API. Determine which
 objects Lua can access/write and how the engine constructs and consumes requests before using them.
 If SE does not expose a sufficient entry point, evaluate a minimal native extension or a game AI
 handoff. An AI handoff offers different control granularity and must be described accordingly.

@@ -8,7 +8,7 @@ end
 local function actor_allowed()
     local host = Osi.GetHostCharacter()
     local host_user = Osi.GetReservedUserID(host)
-    assert(host_user ~= nil and Osi.GetReservedUserID(actor) == host_user, "trace ownership unknown")
+    assert(type(host_user) == "number" and host_user > 0 and Osi.GetReservedUserID(actor) == host_user, "trace ownership unknown")
     for _, row in ipairs(Osi.DB_Avatars:Get(nil)) do
         assert(tostring(row[1]):sub(-36):lower() ~= actor, "trace avatar forbidden")
     end

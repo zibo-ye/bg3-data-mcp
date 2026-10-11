@@ -8,7 +8,7 @@ from .protocol import ACTIONS, identifier, reject
 
 
 def lua_source(name):
-    if name not in ("snapshot.lua", "probe.lua", "trace.lua"):
+    if name not in ("snapshot.lua", "probe.lua", "trace.lua", "prepare.lua"):
         raise ValueError("unknown companion Lua source")
     return (Path(__file__).parent / "lua" / name).read_text(encoding="utf-8")
 

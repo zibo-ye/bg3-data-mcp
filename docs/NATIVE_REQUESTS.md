@@ -50,6 +50,19 @@ runtime interpretation before being used as proof of perception.
 
 ## Casting fields needing real examples
 
+`NativeRequestPreparation` in the same developer-only module resolves a read-only plan using actual SpellBook metadata. It rechecks the expected observer session, recruited non-avatar identity, a positive reserved host user ID, active turn and an idle destination queue. A cast requires a single unambiguous SpellBook source and a self-target Shout stats entry; other targeting adapters remain unavailable. Missing source fields fail rather than being replaced by zero GUIDs. The ordinary Immediate/FromClient flag proposal is retained, with no bypass flags. End-turn plans do not require a spell.
+
+```python
+from bg3data.companion.research import NativeRequestPreparation
+plan = NativeRequestPreparation().prepare(
+    actor_uuid, observed_session_id,
+    {"kind": "cast", "spell_id": "Shout_Hide", "target_uuid": actor_uuid},
+    request_guid,
+)
+```
+
+Plans neither append queues nor change resources; they are not completed/rejected receipts and confer no execution authority. Legality stays unvalidated, including a zero-resource plan. An eventual submitter must repeat all preflight checks and resolve live handles in the same engine call that enqueues the action, rather than replaying an old plan. Production NativeBackend submission remains disabled. Offline tests exercise real Lua source with mocked engine objects; source conversion and stats targeting still require live verification for each supported action.
+
 `CastStartRequest` contains Spell, CastOptions, Caster, Targets, Originator, Item, unknown handles,
 optional CastPosition, StoryActionId, NetGuid, an unknown byte and RequestGuid.
 `SpellId` includes prototype, originator prototype, source type, source and progression-source GUIDs.

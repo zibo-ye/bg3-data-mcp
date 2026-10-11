@@ -41,6 +41,7 @@ local party = try(function() return db_members(Osi.DB_PartyMembers) end)
 local host = uuid(Osi.GetHostCharacter())
 if not host then error("No loaded host character; load a save first") end
 local host_user = try(function() return Osi.GetReservedUserID(host) end)
+if type(host_user) ~= "number" or host_user <= 0 then host_user = nil end
 local selected = host_user and try(function() return uuid(Osi.GetCurrentCharacter(host_user)) end)
 local anchor = requested or host
 local ae = Ext.Entity.Get(anchor)
@@ -63,7 +64,12 @@ local function unit(g, full)
     u.host_owned = host_user ~= nil and try(function() return Osi.GetReservedUserID(g) == host_user end) == true
     u.active_turn = try(function() return e.TurnBased.IsActiveCombatTurn end) == true
     u.can_act = try(function() return e.TurnBased.CanActInCombat end) == true
-    u.turn_ended = try(function() return e.TurnBased.RequestedEndTurn or e.TurnBased.TurnActionsCompleted end) == true
+    u.turn_ended = try(function()
+        local requested_end, completed = e.TurnBased.RequestedEndTurn, e.TurnBased.TurnActionsCompleted
+        if requested_end == true or completed == true then return true end
+        if requested_end == false and completed == false then return false end
+        return nil
+    end)
     u.position = try(function() local x,y,z = Osi.GetPosition(g) return {x=x,y=y,z=z} end)
     u.relation = g == anchor and "self" or "unknown"
     if g ~= anchor then
@@ -81,9 +87,18 @@ local function unit(g, full)
     end)
     if full then
         try(function()
+            local seen = {}
             for _, s in ipairs(e.SpellBook.Spells) do
                 if #u.spells >= 80 then break end
-                u.spells[#u.spells+1] = tostring(s.Id.OriginatorPrototype)
+                -- The concrete prototype is the action token; originator may be a base spell.
+                local prototype = s.Id.Prototype
+                if prototype ~= nil then
+                    prototype = tostring(prototype)
+                    if prototype ~= "" and not seen[prototype] then
+                        seen[prototype] = true
+                        u.spells[#u.spells+1] = prototype
+                    end
+                end
             end
         end)
     end

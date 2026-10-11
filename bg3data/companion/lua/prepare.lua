@@ -29,7 +29,18 @@ if value.kind == "end_turn" then
     plan.queue = "ServerTurnOrder.EndTurn"
     return plan
 end
-assert(value.kind == "cast" and value.target_uuid == actor and value.position == nil, "unsupported target")
+assert(value.kind == "cast" and type(value.target_uuid) == "string" and value.position == nil, "unsupported target")
+-- Party membership is independently established here; arbitrary visible-looking
+-- UUIDs do not establish knowledge of an enemy. Position targeting is not yet
+-- validated. Target conditions, range and hit validity remain unvalidated.
+local target_member = false
+for _, row in ipairs(Osi.DB_PartyMembers:Get(nil)) do
+    if tostring(row[1]):sub(-36):lower() == value.target_uuid then target_member = true end
+end
+assert(target_member, "target is not a known recruited party member")
+assert(Osi.IsDead(value.target_uuid) == 0, "target dead or death state unknown")
+local target = Ext.Entity.Get(value.target_uuid)
+assert(target ~= nil, "target entity unavailable")
 local spell_id = nil
 local candidates = 0
 for _, spell in ipairs(entity.SpellBook.Spells) do
@@ -40,7 +51,10 @@ for _, spell in ipairs(entity.SpellBook.Spells) do
 end
 assert(candidates == 1, "spell missing or source ambiguous")
 local stats = Ext.Stats.Get(value.spell_id)
-assert(stats and tostring(stats.SpellType) == "Shout", "targeting type not validated")
+assert(stats ~= nil, "spell stats unavailable")
+local targeting_type = tostring(stats.SpellType)
+assert((targeting_type == "Shout" and value.target_uuid == actor)
+    or targeting_type == "Target", "targeting type not validated")
 local queue = Ext.System.ServerCastRequest.NetworkStartRequests
 assert(#queue == 0, "cast queue busy")
 local function metadata(field)
@@ -52,7 +66,10 @@ end
 plan.queue = "ServerCastRequest.NetworkStartRequests"
 plan.spell = {Prototype=metadata("Prototype"), OriginatorPrototype=metadata("OriginatorPrototype"),
     SourceType=metadata("SourceType"), Source=metadata("Source"), ProgressionSource=metadata("ProgressionSource")}
-plan.targeting_type = "Shout"
+plan.targeting_type = targeting_type
+-- This describes the target for later same-call resolution; it is deliberately
+-- not an EntityHandle serialized across calls or an enqueue-ready request.
+plan.target = {uuid=value.target_uuid, knowledge="recruited_party", targeting_type=targeting_type}
 plan.cast_options = {"Immediate", "FromClient"}
 plan.originator = {ActionGuid="00000000-0000-0000-0000-000000000000",
     CanApplyConcentration=true, PassiveId="", StatusId="", InterruptId=""}

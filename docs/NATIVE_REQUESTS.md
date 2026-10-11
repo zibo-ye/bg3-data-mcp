@@ -1,7 +1,7 @@
 # Native request investigation
 
 Evidence is from pinned BG3SE source `45f32c1a1fc10b08a962f0463bb5f2cd0cb9cc76`.
-The source audit is supplemented by the limited live observations below; request submission remains unvalidated.
+The source audit is supplemented by the limited live observations below; production request submission remains disabled and generic action support remains unvalidated.
 
 ## Live inspection — 2026-10-10
 
@@ -10,6 +10,8 @@ Independent balanced tutorial campaign, BG3 DX11 4.1.1.7631656 / SE 32. Protecte
 The request used Shout_Hide in Prototype and OriginatorPrototype; SourceType SpellSet; Source and ProgressionSource zero GUIDs; caster self-target with TargetingType Shout; Immediate and FromClient flags; empty NetGuid; generated RequestGuid; default originator metadata. The initial capture did not modify a queue. This example does not establish the proper metadata for other spells, submission legality or multiplayer authority. Local runtime evidence is retained by the consuming project's ignored artifacts/live directory, with findings in docs/LIVE_SESSION.md.
 
 Subsequently, a typed Lua table using actual companion SpellBook metadata was appended to NetworkStartRequests while the companion had zero action points. Conversion and append succeeded (0→1); the engine consumed it, but no additional cast event or resource change occurred. No explicit rejection reason was captured, so this is not proof of an engine cost-check rejection. A separate EndTurn entity append was consumed and changed only that companion's RequestedEndTurn, leaving the allied player active in the same initiative group. No production action capability is enabled by these experiments.
+
+Resumed tests captured initialized started, finished and outcome callbacks for two native self-Shout requests. Hide had equal RequestGuid/SpellCastGuid and agreeing `CantCast` terminal results, with AP 1 unchanged; the cause remains unknown. Dash request `e303973a-ff51-4e35-b3a0-d384665da562` had the same cast GUID, started at tick 2702 and finished/outcome `None` at tick 2703, plus independent CastedSpell Shout_Dash sequence 4, AP 1→0 and movement 9→18. This proves normal payment and effect for this Dash sample, and exact GUID correlation for these two samples; it does not prove generic targeting or multiplayer synchronization. Details and the developer-only bounded evidence reducer are in [target/result research](NATIVE_TARGET_RESEARCH.md). Production capabilities remain disabled.
 
 ## Bounded developer trace
 
@@ -29,7 +31,7 @@ finally:
     evidence = trace.query(actor_uuid, "stop")
 ```
 
-It rejects avatars, remote-owned and unrecruited actors; filters queue and cast records to the bound companion; records request and cast GUIDs separately; stops on session epoch changes, after 3600 system ticks or three errors; and retains at most 96 records. Partial installation rolls back subscriptions. Calling read/stop does not reinstall. Stopping preserves collected evidence. Offline Lua tests cover these invariants; actual component creation timing and metadata initialization remain unvalidated. A matching spell name, empty queue or unrelated CastedSpell event cannot by itself establish request completion.
+It rejects avatars, remote-owned and unrecruited actors; filters queue and cast records to the bound companion; records request and cast GUIDs separately; stops on session epoch changes, after 3600 system ticks or three errors; and retains at most 96 records. Partial installation rolls back subscriptions. Calling read/stop does not reinstall. Stopping preserves collected evidence. Offline Lua tests cover these invariants; actual component creation timing and metadata initialization were observed in the two self-Shout samples above. A matching spell name, empty queue or unrelated CastedSpell event cannot by itself establish request completion.
 
 ## Confirmed exposure in source
 
@@ -50,7 +52,7 @@ runtime interpretation before being used as proof of perception.
 
 ## Casting fields needing real examples
 
-`NativeRequestPreparation` in the same developer-only module resolves a read-only plan using actual SpellBook metadata. It rechecks the expected observer session, recruited non-avatar identity, a positive reserved host user ID, active turn and an idle destination queue. A cast requires a single unambiguous SpellBook source and a self-target Shout stats entry; other targeting adapters remain unavailable. Missing source fields fail rather than being replaced by zero GUIDs. The ordinary Immediate/FromClient flag proposal is retained, with no bypass flags. End-turn plans do not require a spell.
+`NativeRequestPreparation` in the same developer-only module resolves a read-only plan using actual SpellBook metadata. It rechecks the expected observer session, recruited non-avatar identity, a positive reserved host user ID, active turn and an idle destination queue. A cast requires a single unambiguous SpellBook source. Supported research plans are self-target Shout entries or Target entries directed at a living, currently recruited party entity; enemy and position targeting remain unavailable. The target descriptor stores a UUID, not a transferable engine handle or an enqueue-ready request. Missing source fields fail rather than being replaced by zero GUIDs. The ordinary Immediate/FromClient flag proposal is retained, with no bypass flags. End-turn plans do not require a spell. See [target and result source research](NATIVE_TARGET_RESEARCH.md) for limits.
 
 ```python
 from bg3data.companion.research import NativeRequestPreparation
@@ -96,4 +98,4 @@ a minimal native entry point against these same requirements; do not emulate leg
 
 ## Queue trace sampling
 
-A request held in a queue is recorded once per continuous presence, keyed by queue and request GUID. A later complete sample may record `queue_departed`; it proves only observed absence, never consumption, rejection or success. Sampling is bounded to 96 companion entries and skips departure inference for incomplete samples. Queue and cast records preserve their separate network identity fields for inspection; those fields do not establish a validated mapping. Cast callbacks recheck companion ownership before recording. Fourteen mocked trace tests cover these limits; real engine callback timing and request-to-cast correlation remain unverified.
+A request held in a queue is recorded once per continuous presence, keyed by queue and request GUID. A later complete sample may record `queue_departed`; it proves only observed absence, never consumption, rejection or success. Sampling is bounded to 96 companion entries and skips departure inference for incomplete samples. Queue and cast records preserve their separate network identity fields for inspection; field names alone do not establish a mapping. Cast callbacks recheck companion ownership before recording. Fourteen mocked trace tests cover these limits; the two self-Shout samples above provide limited runtime callback/GUID evidence. Generic request-to-cast correlation remains unverified.

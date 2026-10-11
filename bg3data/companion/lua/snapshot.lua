@@ -7,7 +7,8 @@ local function uuid(g)
 end
 local function try(fn)
     local ok, result = pcall(fn)
-    return ok and result or nil
+    if ok then return result end
+    return nil
 end
 local function bounded_text(text, detail, field)
     if #text <= 512 then return text end
@@ -60,7 +61,14 @@ local ae = Ext.Entity.Get(anchor)
 if not ae then error("Requested companion does not exist in this session") end
 local combat = try(function() return ae.CombatParticipant.CombatHandle.CombatState end)
 local combat_id = try(function() return tostring(combat.MyGuid) end)
-local round = try(function() return ae.CombatParticipant.CombatHandle.TurnOrder.Round end)
+local round = try(function()
+    local order = ae.CombatParticipant.CombatHandle.TurnOrder
+    -- SE v32 exposes the same reflected round field by its legacy name.
+    local value = try(function() return order.Round end)
+    if value == nil then value = try(function() return order.field_40 end) end
+    if type(value) == "number" and value >= 0 and value % 1 == 0 then return value end
+    return nil
+end)
 local function unit(g, full)
     local e = Ext.Entity.Get(g)
     if not e then return nil end

@@ -39,8 +39,8 @@ class NativeRequestPreparation:
         value = action(value)
         if value["kind"] not in ("cast", "end_turn"):
             reject("unsupported_action", "native request preparation is not implemented for this action")
-        if value["kind"] == "cast" and value.get("target_uuid") != actor_uuid:
-            reject("unsupported_target", "native visibility/target adapter is not validated")
+        if value["kind"] == "cast" and "position" in value:
+            reject("unsupported_target", "native position targeting adapter is not validated")
         spec = {"actor_uuid": actor_uuid, "session_id": session_id,
                 "action": value, "request_guid": request_guid}
         encoded = json.dumps(json.dumps(spec, allow_nan=False))

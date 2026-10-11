@@ -1,4 +1,8 @@
-"""Developer-only LOS research; not a companion visibility capability."""
+"""Developer-only LOS/concealment research, not a visibility capability.
+
+The proposed conservative_status is diagnostic only: candidate never implies
+visibility_verified. Invisibility's opaque byte has no inferred semantics.
+"""
 import json
 from pathlib import Path
 

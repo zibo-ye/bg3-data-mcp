@@ -25,6 +25,8 @@ class CompanionService:
         self.db.execute("CREATE TABLE IF NOT EXISTS requests (id TEXT PRIMARY KEY, client_id TEXT UNIQUE NOT NULL, actor TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL, result TEXT NOT NULL, intent TEXT NOT NULL DEFAULT '{}')")
         if "intent" not in {row[1] for row in self.db.execute("PRAGMA table_info(requests)")}:
             self.db.execute("ALTER TABLE requests ADD COLUMN intent TEXT NOT NULL DEFAULT '{}'")
+        if "context" not in {row[1] for row in self.db.execute("PRAGMA table_info(requests)")}:
+            self.db.execute("ALTER TABLE requests ADD COLUMN context TEXT NOT NULL DEFAULT '{}'")
         self.db.commit()
         self.pending_at = {}
 
@@ -130,9 +132,11 @@ class CompanionService:
             self.armed = False
         return result
 
-    def _receipt(self, request_id, actor, receipt):
+    def _receipt(self, request_id, actor, receipt, context=None):
         if not isinstance(receipt, dict) or receipt.get("request_id") != request_id or receipt.get("actor_uuid") != actor or receipt.get("status") not in TERMINAL | {"pending"}:
             return {"request_id": request_id, "actor_uuid": actor, "status": "uncertain", "reason": "backend result cannot be correlated"}
+        if context and any(receipt.get(key) != context[key] for key in ("session_id", "engine_request_guid")):
+            return {"request_id": request_id, "actor_uuid": actor, "status": "uncertain", "reason": "backend result does not match original request scope"}
         # Backend internals/raw snapshots never enter the public result.
         result = {k: copy.deepcopy(receipt[k]) for k in ("request_id", "actor_uuid", "status", "reason", "events", "changes") if k in receipt}
         result["backend"] = self.capabilities()["backend"]
@@ -141,6 +145,52 @@ class CompanionService:
         except (ValueError, TypeError):
             return {"request_id": request_id, "actor_uuid": actor, "status": "uncertain", "reason": "backend returned invalid result data"}
         return result
+
+    def _scoped_hooks(self):
+        submit = getattr(self.backend, "scoped_submit", None)
+        poll = getattr(self.backend, "scoped_poll", None)
+        if callable(submit) != callable(poll):
+            reject("invalid_backend", "scoped submission and polling must be provided together")
+        return callable(submit)
+
+    def _new_context(self, request_id, actor, value, current):
+        if not self._scoped_hooks():
+            return {}
+        session = current.get("session_id")
+        if not isinstance(session, str) or not 1 <= len(session) <= 128:
+            reject("invalid_session", "scoped execution needs a bounded observed session ID")
+        return {"scope_version": 1, "actor_uuid": actor, "session_id": session,
+                "engine_request_guid": str(uuid.UUID(request_id)),
+                "backend": self.capabilities()["backend"], "action_digest": digest(value)}
+
+    def _poll_receipt(self, request_id, actor):
+        """Dispatch using persisted scope, never the current observation/session."""
+        def uncertain(reason):
+            return {"request_id": request_id, "actor_uuid": actor, "status": "uncertain", "reason": reason}
+        try:
+            row = self.db.execute("SELECT context,intent FROM requests WHERE id=? AND actor=?", (request_id, actor)).fetchone()
+            context = json.loads(row[0])
+            scoped = self._scoped_hooks()
+            if not isinstance(context, dict):
+                return uncertain("persisted request scope invalid; no poll attempted")
+            if not context:
+                if scoped:
+                    return uncertain("original request scope missing; no scoped poll attempted")
+                return self._receipt(request_id, actor, self.backend.poll(request_id))
+            if not scoped:
+                return uncertain("scoped request cannot be polled by an unscoped backend")
+            required = {"scope_version", "actor_uuid", "session_id", "engine_request_guid", "backend", "action_digest"}
+            if (not isinstance(context, dict) or set(context) != required or type(context["scope_version"]) is not int
+                or context["scope_version"] != 1 or context["actor_uuid"] != actor
+                or not isinstance(context["session_id"], str) or not 1 <= len(context["session_id"]) <= 128
+                or context["engine_request_guid"] != str(uuid.UUID(request_id))
+                or context["backend"] != self.capabilities()["backend"]
+                or context["action_digest"] != digest(json.loads(row[1]))):
+                return uncertain("persisted request scope invalid; no scoped poll attempted")
+            receipt = self.backend.scoped_poll(request_id, actor, copy.deepcopy(context))
+            return self._receipt(request_id, actor, receipt, context)
+        except Exception:
+            return uncertain("result transport or stored scope failed")
 
     def request(self, observation_id, value, client_request_id):
         with self.lock:
@@ -156,8 +206,9 @@ class CompanionService:
                 reject("paused", "enable companion control first")
             if self.status()["outstanding"]:
                 reject("outstanding_request", "previous request must settle before another action")
-            self._validate(observation_id, value)
+            current = self._validate(observation_id, value)
             request_id = uuid.uuid4().hex
+            context = self._new_context(request_id, self.actor, value, current)
             pending = {"request_id": request_id, "actor_uuid": self.actor, "status": "pending", "backend": self.capabilities()["backend"], "action": value}
             # Reserve before submitting. A crash must never cause a request to be resent.
             try:
@@ -166,7 +217,7 @@ class CompanionService:
                     reject("journal_full", "request journal capacity reached; archive deliberately")
                 if self.db.execute("SELECT 1 FROM requests WHERE actor=? AND status IN ('pending','uncertain')", (self.actor,)).fetchone():
                     reject("outstanding_request", "another session has an outstanding request")
-                self.db.execute("INSERT INTO requests (id,client_id,actor,payload,status,result,intent) VALUES (?,?,?,?,?,?,?)", (request_id, client_request_id, self.actor, payload, "pending", json.dumps(pending), json.dumps(value, allow_nan=False)))
+                self.db.execute("INSERT INTO requests (id,client_id,actor,payload,status,result,intent,context) VALUES (?,?,?,?,?,?,?,?)", (request_id, client_request_id, self.actor, payload, "pending", json.dumps(pending), json.dumps(value, allow_nan=False), json.dumps(context, allow_nan=False)))
                 self.db.commit()
             except sqlite3.IntegrityError:
                 self.db.rollback()
@@ -180,10 +231,13 @@ class CompanionService:
             self.observations.clear()
             self.pending_at[request_id] = self.clock()
             try:
-                receipt = self.backend.submit(request_id, self.actor, value)
+                receipt = (self.backend.scoped_submit(request_id, self.actor, value, copy.deepcopy(context))
+                           if context else self.backend.submit(request_id, self.actor, value))
             except Exception:
                 receipt = {"request_id": request_id, "actor_uuid": self.actor, "status": "uncertain", "reason": "transport failed after request reservation; do not retry"}
-            return self._save(request_id, self._receipt(request_id, self.actor, receipt))
+                if context:
+                    receipt.update(session_id=context["session_id"], engine_request_guid=context["engine_request_guid"])
+            return self._save(request_id, self._receipt(request_id, self.actor, receipt, context))
 
     def result(self, request_id):
         with self.lock:
@@ -198,7 +252,7 @@ class CompanionService:
                 # A restarted process cannot establish whether its predecessor submitted.
                 return self._save(request_id, {"request_id": request_id, "actor_uuid": row[1], "status": "uncertain", "reason": "service restarted with an unresolved request"})
             try:
-                receipt = self._receipt(request_id, row[1], self.backend.poll(request_id))
+                receipt = self._poll_receipt(request_id, row[1])
             except Exception:
                 receipt = {"request_id": request_id, "actor_uuid": row[1], "status": "uncertain", "reason": "result transport failed"}
             if receipt["status"] == "pending" and self.clock() - self.pending_at[request_id] >= self.timeout:
@@ -215,7 +269,7 @@ class CompanionService:
             if row[3] != "uncertain":
                 return self.result(request_id)
             try:
-                receipt = self._receipt(request_id, row[1], self.backend.poll(request_id))
+                receipt = self._poll_receipt(request_id, row[1])
             except Exception:
                 return json.loads(row[4])
             if receipt["status"] not in ("completed", "rejected"):

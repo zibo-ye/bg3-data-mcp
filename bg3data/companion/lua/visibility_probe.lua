@@ -44,21 +44,38 @@ assert(Osi.IsDead(actor) == 0, "actor unavailable")
 local entity = Ext.Entity.Get(actor)
 assert(entity ~= nil, "actor entity unavailable")
 local ok_set, can_see = pcall(function() return entity.ServerViewshedParticipant.CanSee end)
+local ok_sight, actor_sight = pcall(function() return entity.SightData.SightUuid end)
+if not ok_sight or actor_sight == nil then actor_sight = nil end
+if actor_sight ~= nil then
+    local ok_guid = pcall(uuid, tostring(actor_sight):lower())
+    if not ok_guid or tostring(actor_sight) == "00000000-0000-0000-0000-000000000000" then actor_sight = nil end
+end
+local function read(object, getter, expected)
+    local ok, value = pcall(getter, object)
+    if not ok or type(value) ~= expected then return nil end
+    return value
+end
+local function byte(object, getter)
+    local value = read(object, getter, "number")
+    if value and value >= 0 and value <= 255 and value % 1 == 0 then return value end
+    return nil
+end
 local out = {actor_uuid=actor, session_id=spec.session_id,
     data_source="ServerViewshedParticipant.CanSee", research_only=true,
     visibility_verified=false, stealth_semantics="unvalidated", candidates={}}
 for _, candidate in ipairs(spec.candidate_uuids) do
-    local item = {uuid=candidate, membership_status="unknown", visibility_verified=false}
-    if not ok_set or can_see == nil then
-        item.reason = "viewshed_component_unavailable"
+    local item = {uuid=candidate, membership_status="unknown", visibility_verified=false,
+        reverse_membership_status="unknown", concealment={}, conservative_status="unknown"}
+    local ok_handle, handle = pcall(Ext.Entity.UuidToHandle, candidate)
+    local ok_uuid, resolved = false, nil
+    if ok_handle and handle ~= nil then
+        ok_uuid, resolved = pcall(Ext.Entity.HandleToUuid, handle)
+    end
+    if not ok_uuid or resolved == nil or tostring(resolved):lower() ~= candidate then
+        item.reason = "candidate_handle_unavailable"
     else
-        local ok_handle, handle = pcall(Ext.Entity.UuidToHandle, candidate)
-        local ok_uuid, resolved = false, nil
-        if ok_handle and handle ~= nil then
-            ok_uuid, resolved = pcall(Ext.Entity.HandleToUuid, handle)
-        end
-        if not ok_uuid or resolved == nil or tostring(resolved):lower() ~= candidate then
-            item.reason = "candidate_handle_unavailable"
+        if not ok_set or can_see == nil then
+            item.reason = "viewshed_component_unavailable"
         else
             -- Official LuaSetProxy::Index implements HashSet membership.
             local ok_member, present = pcall(function() return can_see[handle] end)
@@ -67,6 +84,45 @@ for _, candidate in ipairs(spec.candidate_uuids) do
                 item.los_member = present
             else
                 item.reason = "membership_query_unavailable"
+            end
+        end
+        local ok_target, target = pcall(Ext.Entity.Get, candidate)
+        if ok_target and target ~= nil then
+            if actor_sight ~= nil then
+                local reverse = read(target, function(t) return t.SightEntityViewshed.Viewshed[actor_sight] end, "boolean")
+                if reverse ~= nil then
+                    item.viewshed_member = reverse
+                    item.reverse_membership_status = "observed"
+                end
+            end
+            local flags = item.concealment
+            flags.server_character_invisible = read(target, function(t) return t.ServerCharacter.Invisible end, "boolean")
+            flags.server_character_off_stage = read(target, function(t) return t.ServerCharacter.OffStage end, "boolean")
+            flags.character_sneaking = read(target, function(t) return t.Darkness.CharacterSneaking end, "boolean")
+            flags.actually_sneaking = read(target, function(t) return t.Darkness.ActuallySneaking end, "boolean")
+            flags.sneaking_raw = byte(target, function(t) return t.Darkness.Sneaking end)
+            flags.seek_hidden = read(target, function(t) return t.Stealth.SeekHiddenFlag end, "boolean")
+            local ok_invisibility, invisibility = pcall(function() return target.Invisibility end)
+            if ok_invisibility then
+                flags.invisibility_component_present = invisibility ~= nil
+                if invisibility ~= nil then
+                    flags.invisibility_raw = byte(invisibility, function(c) return c.field_0 end)
+                end
+            end
+            -- Proposed restrictive policy, NOT a verified perception rule.
+            -- Unknown/missing flags never count as false. Component presence
+            -- blocks even when its opaque byte is zero; no semantics guessed.
+            if item.los_member == false or item.viewshed_member == false
+                or flags.server_character_invisible == true or flags.server_character_off_stage == true
+                or flags.character_sneaking == true or flags.actually_sneaking == true
+                or (flags.sneaking_raw ~= nil and flags.sneaking_raw ~= 0)
+                or flags.invisibility_component_present == true then
+                item.conservative_status = "blocked"
+            elseif item.los_member == true and item.viewshed_member == true
+                and flags.server_character_invisible == false and flags.server_character_off_stage == false
+                and flags.character_sneaking == false and flags.actually_sneaking == false
+                and flags.sneaking_raw == 0 and flags.invisibility_component_present == false then
+                item.conservative_status = "candidate"
             end
         end
     end

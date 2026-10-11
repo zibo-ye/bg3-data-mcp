@@ -6,6 +6,8 @@ import unittest
 import contextlib
 import json
 import re
+import sqlite3
+import uuid
 from unittest.mock import patch
 from pathlib import Path
 
@@ -420,6 +422,153 @@ class CompanionTests(unittest.TestCase):
         result = self.submit({"kind": "end_turn"})
         self.assertEqual("uncertain", result["status"])
         self.assertFalse(self.service.armed)
+
+
+class ScopedFixtureBackend(SimulationBackend):
+    """Simulated receipts exercising scope storage, never native support."""
+    def __init__(self):
+        super().__init__(deferred=True)
+        self.submit_contexts, self.poll_contexts = [], []
+        self.echo_override = {}
+        self.poll_status = "pending"
+
+    def scoped_submit(self, request_id, actor, value, context):
+        self.submit_contexts.append(copy.deepcopy(context))
+        result = super().submit(request_id, actor, value)
+        result.update(session_id=context["session_id"], engine_request_guid=context["engine_request_guid"])
+        result.update(self.echo_override)
+        context["session_id"] = "backend-mutated-copy"
+        return result
+
+    def scoped_poll(self, request_id, actor, context):
+        self.poll_contexts.append(copy.deepcopy(context))
+        return {"request_id":request_id,"actor_uuid":actor,"status":self.poll_status,
+                "session_id":context["session_id"],"engine_request_guid":context["engine_request_guid"],
+                **self.echo_override}
+
+
+class ScopedServiceTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.path = str(Path(self.temp.name) / "requests.sqlite")
+        self.backend = ScopedFixtureBackend()
+        self.services = []
+        self.addCleanup(lambda:[service.close() for service in self.services])
+        self.service = self.open(self.backend)
+        self.service.control(True)
+
+    def open(self, backend):
+        service = CompanionService(backend,self.path)
+        self.services.append(service)
+        service.bind(ACTOR)
+        return service
+
+    def submit(self):
+        return self.service.request(self.service.observe()["observation_id"],{"kind":"end_turn"},"scoped-one")
+
+    def context(self, request_id):
+        return json.loads(self.service.db.execute("SELECT context FROM requests WHERE id=?",(request_id,)).fetchone()[0])
+
+    def test_persisted_context_maps_engine_uuid_and_original_session_before_submit(self):
+        pending = self.submit()
+        scope = self.context(pending["request_id"])
+        self.assertEqual("offline-world-1",scope["session_id"])
+        self.assertEqual(str(uuid.UUID(pending["request_id"])),scope["engine_request_guid"])
+        self.assertEqual(ACTOR,scope["actor_uuid"])
+        self.assertEqual(scope,self.backend.submit_contexts[0])
+        self.assertNotEqual("backend-mutated-copy",scope["session_id"])
+        self.assertEqual(pending,self.service.request("consumed",{"kind":"end_turn"},"scoped-one"))
+        self.assertEqual(1,len(self.backend.submissions))
+
+    def test_restarted_poll_uses_stored_original_scope_after_session_change(self):
+        pending = self.submit()
+        original = self.context(pending["request_id"])
+        changed = ScopedFixtureBackend()
+        changed.state["session_id"] = "reloaded-session"
+        changed.poll_status = "completed"
+        restarted = self.open(changed)
+        self.assertEqual("uncertain",restarted.result(pending["request_id"])["status"])
+        self.assertEqual("completed",restarted.reconcile(pending["request_id"])["status"])
+        self.assertEqual([original],changed.poll_contexts)
+        self.assertEqual([],changed.submissions)
+        self.assertFalse(restarted.armed)
+
+    def test_wrong_session_or_engine_guid_receipt_is_uncertain_and_pauses(self):
+        pending = self.submit()
+        for override in ({"session_id":"new-session"},{"engine_request_guid":str(uuid.uuid4())}):
+            self.backend.echo_override = override
+            self.backend.poll_status = "completed"
+            result = self.service.reconcile(pending["request_id"])
+            self.assertEqual("uncertain",result["status"])
+            self.assertFalse(self.service.armed)
+        self.assertEqual(1,len(self.backend.submissions))
+
+    def test_wrong_scope_on_submit_is_uncertain_and_not_retried(self):
+        self.backend.echo_override = {"engine_request_guid":str(uuid.uuid4())}
+        uncertain = self.submit()
+        self.assertEqual("uncertain",uncertain["status"])
+        self.assertFalse(self.service.armed)
+        self.assertEqual(uncertain,self.service.request("old",{"kind":"end_turn"},"scoped-one"))
+        self.assertEqual(1,len(self.backend.submissions))
+
+    def test_tampered_mapping_actor_backend_digest_or_version_blocks_poll(self):
+        pending = self.submit()
+        original = self.context(pending["request_id"])
+        for changes in ({"engine_request_guid":str(uuid.uuid4())},{"actor_uuid":HOST},
+                        {"backend":"native"},{"action_digest":"wrong"},{"scope_version":True},
+                        {"session_id":""}):
+            scope = {**original,**changes}
+            self.service.db.execute("UPDATE requests SET context=? WHERE id=?",(json.dumps(scope),pending["request_id"]))
+            self.service.db.commit()
+            self.assertEqual("uncertain",self.service.reconcile(pending["request_id"])["status"])
+        self.assertEqual([],self.backend.poll_contexts)
+        self.assertEqual(1,len(self.backend.submissions))
+
+    def test_missing_legacy_scope_does_not_reconstruct_current_session(self):
+        pending = self.submit()
+        self.service.db.execute("UPDATE requests SET context='{}' WHERE id=?",(pending["request_id"],))
+        self.service.db.commit()
+        self.assertEqual("uncertain",self.service.result(pending["request_id"])["status"])
+        self.assertEqual("uncertain",self.service.reconcile(pending["request_id"])["status"])
+        self.assertEqual([],self.backend.poll_contexts)
+
+    def test_unscoped_backend_cannot_poll_scoped_rows(self):
+        pending = self.submit()
+        legacy = SimulationBackend()
+        legacy.poll = lambda request_id:self.fail("must not call unscoped poll for scoped row")
+        restarted = self.open(legacy)
+        self.assertEqual("uncertain",restarted.result(pending["request_id"])["status"])
+        self.assertEqual("uncertain",restarted.reconcile(pending["request_id"])["status"])
+        self.assertEqual([],legacy.submissions)
+
+    def test_partial_hook_pair_and_overlong_session_reject_before_reservation(self):
+        self.backend.scoped_poll = None
+        with self.assertRaises(Rejected) as partial: self.submit()
+        self.assertEqual("invalid_backend",partial.exception.code)
+        self.assertEqual(0,self.service.db.execute("SELECT count(*) FROM requests").fetchone()[0])
+        del self.backend.scoped_poll
+        self.backend.state["session_id"] = "x"*129
+        with self.assertRaises(Rejected) as session: self.submit()
+        self.assertEqual("invalid_session",session.exception.code)
+        self.assertEqual([],self.backend.submissions)
+
+    def test_old_database_migration_keeps_unscoped_rows_but_does_not_invent_scope(self):
+        path = str(Path(self.temp.name) / "legacy.sqlite")
+        connection = sqlite3.connect(path)
+        connection.execute("CREATE TABLE requests (id TEXT PRIMARY KEY, client_id TEXT UNIQUE NOT NULL, actor TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL, result TEXT NOT NULL)")
+        request_id = uuid.uuid4().hex
+        result = {"request_id":request_id,"actor_uuid":ACTOR,"status":"pending"}
+        connection.execute("INSERT INTO requests VALUES (?,?,?,?,?,?)",(request_id,"legacy",ACTOR,"unused","pending",json.dumps(result)))
+        connection.commit()
+        connection.close()
+        service = CompanionService(self.backend,path)
+        self.services.append(service)
+        service.bind(ACTOR)
+        self.assertEqual("{}",service.db.execute("SELECT context FROM requests").fetchone()[0])
+        self.assertEqual("uncertain",service.result(request_id)["status"])
+        self.assertEqual("uncertain",service.reconcile(request_id)["status"])
+        self.assertEqual([],self.backend.poll_contexts)
 
 
 class ProtocolTests(unittest.TestCase):

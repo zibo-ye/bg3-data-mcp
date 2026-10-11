@@ -423,6 +423,16 @@ class CompanionTests(unittest.TestCase):
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_visible_nonparty_spell_details_are_private(self):
+        from bg3data.companion.simulation import fixture
+        raw=fixture()
+        raw['actor']['spell_details']={'Target_HealingWord':{'fields':{'UseCosts':'BonusActionPoint:1'}}}
+        enemy=next(u for u in raw['combatants'] if u['uuid']==ENEMY)
+        enemy['spell_details']={'Target_Secret':{'fields':{'UseCosts':'free'}}}
+        public=observation(raw,ACTOR)
+        self.assertIn('Target_HealingWord',public['actor']['spell_details'])
+        self.assertNotIn('spell_details',next(u for u in public['combatants'] if u['uuid']==ENEMY))
+
     def test_malformed_actions_rejected(self):
         values = [None, [], {}, {"kind": "teleport"}, {"kind": "end_turn", "x": 1},
                   {"kind": "cast", "spell_id": "Attack", "target_uuid": ENEMY, "position": {"x": 1, "y": 0, "z": 0}},

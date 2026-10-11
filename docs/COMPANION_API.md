@@ -107,3 +107,12 @@ Do not silently switch backend when native submission fails.
 Retain `upstream` as the original repository and `origin` as this fork. Work on `companion-api`
 and pin the consumer to reviewed commits. Preserve upstream defaults, license and existing tool
 behavior. Sync upstream deliberately and run appropriate offline checks after conflicts or changes.
+
+
+## Known skill information
+
+Native actor observations now include `spell_details`, keyed by the concrete known spell prototype. The read-only snapshot selects nine loaded stat fields: SpellType, TargetRadius, AreaRadius, UseCosts, TargetConditions, SpellProperties, SpellFlags, DisplayName and Description. Unsupported/non-scalar fields remain absent. DisplayName/Description handles are also looked up through Ext.Loca when available; parameter placeholders are not evaluated.
+
+Each entry declares `data_source: loaded_stats` and `legality: not_evaluated`. Fields and localized text are limited to 512 UTF-8 bytes, without slicing a code point; `truncated_fields` names omitted tails. The existing 80-spell cap also bounds these entries. UseCosts and conditions remain raw expressions, preserving conditional/level-dependent mechanics rather than guessing a numeric cost. Missing metadata is unknown, not free or valid. Native runtime stat shape and localization must still be verified in the independent campaign.
+
+The public protocol strips spell_details from nonparty entities even when visible. The model receives these fields in the existing text observation, with no new tools or execution privilege. Loaded descriptions are game data, never agent instructions. Native action capabilities remain unavailable.

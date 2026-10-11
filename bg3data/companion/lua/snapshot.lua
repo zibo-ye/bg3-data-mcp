@@ -9,6 +9,18 @@ local function try(fn)
     local ok, result = pcall(fn)
     return ok and result or nil
 end
+local function bounded_text(text, detail, field)
+    if #text <= 512 then return text end
+    detail.truncated_fields[#detail.truncated_fields+1] = field
+    local cut = 512
+    -- Avoid slicing through a UTF-8 code point in localized text.
+    while cut > 0 do
+        local next_byte = text:byte(cut+1)
+        if next_byte < 128 or next_byte >= 192 then break end
+        cut = cut - 1
+    end
+    return text:sub(1,cut)
+end
 -- Observe cast events so a changed HP total alone cannot be mistaken for our action.
 -- This records events in the console Lua environment; it does not alter combat rules.
 if not BG3AC_Observer then
@@ -54,7 +66,7 @@ local function unit(g, full)
     if not e then return nil end
     local u = {uuid = g, avatar = avatars and avatars[g] or false,
         avatar_verified = avatars ~= nil, party_member = party and party[g] or false,
-        party_verified = party ~= nil, host_owned = false, resources = {}, spells = {},
+        party_verified = party ~= nil, host_owned = false, resources = {}, spells = {}, spell_details = {},
         in_combat = Osi.IsInCombat(g) == 1, dead = Osi.IsDead(g) == 1,
         hp = Osi.GetHitpoints(g), max_hp = Osi.GetMaxHitpoints(g)}
     u.name = try(function() return e.CharacterCreationStats.Name end)
@@ -97,6 +109,30 @@ local function unit(g, full)
                     if prototype ~= "" and not seen[prototype] then
                         seen[prototype] = true
                         u.spells[#u.spells+1] = prototype
+                        local stats = try(function() return Ext.Stats.Get(prototype) end)
+                        if stats then
+                            local detail = {data_source="loaded_stats", legality="not_evaluated",
+                                fields={}, text={}, truncated_fields={}}
+                            for _, field in ipairs({"SpellType", "TargetRadius", "AreaRadius", "UseCosts",
+                                "TargetConditions", "SpellProperties", "SpellFlags", "DisplayName", "Description"}) do
+                                local v = try(function() return stats[field] end)
+                                if type(v) == "string" or type(v) == "number" or type(v) == "boolean" then
+                                    local text = tostring(v)
+                                    detail.fields[field] = bounded_text(text,detail,field)
+                                end
+                            end
+                            for _, field in ipairs({"DisplayName", "Description"}) do
+                                local handle = detail.fields[field]
+                                if handle then
+                                    local translated = try(function() return Ext.Loca.GetTranslatedString(handle) end)
+                                    if type(translated) == "string" and translated ~= "" and translated ~= handle then
+                                        detail.text[field] = bounded_text(translated,detail,"text."..field)
+                                    end
+                                end
+                            end
+                            -- Handles and conditions remain raw; never guess dynamic legality/costs.
+                            u.spell_details[prototype] = detail
+                        end
                     end
                 end
             end

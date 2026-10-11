@@ -99,7 +99,7 @@ def eligible(unit):
 
 UNIT_FIELDS = frozenset(("uuid", "name", "avatar", "avatar_verified", "party_member", "party_verified", "host_owned",
                         "dead", "hp", "max_hp", "position", "in_combat", "active_turn", "can_act", "turn_ended",
-                        "relation", "resources", "spells", "visible", "visibility_verified", "interactable"))
+                        "relation", "resources", "spells", "spell_details", "visible", "visibility_verified", "interactable"))
 
 
 def observation(raw, actor_uuid=None):
@@ -112,7 +112,7 @@ def observation(raw, actor_uuid=None):
         out = {k: copy.deepcopy(v) for k, v in value.items() if k in UNIT_FIELDS}
         if value.get("party_member") is not True or value.get("party_verified") is not True:
             # Visible opponents are observable, not inspectable private character sheets.
-            for key in ("resources", "spells", "host_owned", "avatar", "avatar_verified"):
+            for key in ("resources", "spells", "spell_details", "host_owned", "avatar", "avatar_verified"):
                 out.pop(key, None)
         out["uuid"] = identifier(out.get("uuid"))
         if "position" in out:

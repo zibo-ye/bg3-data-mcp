@@ -8,7 +8,8 @@ import math
 import re
 import uuid
 
-ACTIONS = ("cast", "move", "end_turn", "react", "follow", "interact")
+V1_ACTIONS = ("cast", "move", "end_turn", "react", "follow", "interact")
+ACTIONS = V1_ACTIONS + ("throw",)
 TERMINAL = frozenset(("completed", "rejected", "uncertain"))
 
 
@@ -60,7 +61,11 @@ def action(value, supported_versions=(1, 2)):
         if type(value["schema_version"]) is not int or value["schema_version"] != 2 or 2 not in supported_versions:
             reject("unsupported_action_version", "action contract version is not supported")
         if value.get("kind") == "throw":
-            reject("unsupported_action", "inventory throw contract is not implemented")
+            if set(value) != {"kind", "schema_version", "inventory_option_id", "target"}:
+                reject("invalid_action", "v2 throw requires only version, observed inventory option and one target")
+            return {"kind":"throw", "schema_version":2,
+                    "inventory_option_id":token(value["inventory_option_id"], "inventory_option_id"),
+                    "target":cast_target(value["target"])}
         if value.get("kind") != "cast" or set(value) != {"kind", "schema_version", "spell_option_id", "targets"}:
             reject("invalid_action", "v2 cast requires only version, observed option and targets")
         if not isinstance(value["targets"], list) or not 1 <= len(value["targets"]) <= 16:
@@ -70,7 +75,7 @@ def action(value, supported_versions=(1, 2)):
                 "targets": [cast_target(v) for v in value["targets"]]}
     if 1 not in supported_versions:
         reject("unsupported_action_version", "v1 action contract is not supported")
-    if not isinstance(value, dict) or value.get("kind") not in ACTIONS:
+    if not isinstance(value, dict) or value.get("kind") not in V1_ACTIONS:
         reject("invalid_action", "unknown action kind")
     kind = value["kind"]
     expected = {
@@ -119,7 +124,40 @@ def eligible(unit):
 
 UNIT_FIELDS = frozenset(("uuid", "name", "avatar", "avatar_verified", "party_member", "party_verified", "host_owned",
                         "dead", "hp", "max_hp", "position", "in_combat", "active_turn", "can_act", "turn_ended",
-                        "relation", "resources", "spells", "spell_details", "cast_options", "visible", "visibility_verified", "interactable"))
+                        "relation", "resources", "spells", "spell_details", "cast_options", "inventory_options", "visible", "visibility_verified", "interactable"))
+
+
+def inventory_options(value, actor_uuid):
+    if not isinstance(value, list) or len(value) > 64:
+        reject("invalid_snapshot", "inventory options require a bounded list")
+    out, seen_ids, seen_items = [], set(), set()
+    required = {"id", "session_id", "revision", "item_uuid", "owner_uuid", "ownership_verified", "quantity", "throw_eligible", "target_types"}
+    for item in value:
+        if not isinstance(item, dict): reject("invalid_snapshot", "inventory option must be an object")
+        if item.get("owner_uuid") != actor_uuid or item.get("ownership_verified") is not True or item.get("throw_eligible") is not True:
+            continue
+        if not required <= set(item): reject("invalid_snapshot", "inventory choice identity incomplete")
+        row = {key:copy.deepcopy(item[key]) for key in required | {"label", "range", "action_point_cost"} if key in item}
+        row["id"], row["revision"] = token(row["id"]), token(row["revision"])
+        row["item_uuid"], row["owner_uuid"] = identifier(row["item_uuid"]), identifier(row["owner_uuid"])
+        if row["id"] in seen_ids or row["item_uuid"] in seen_items:
+            reject("invalid_snapshot", "duplicate inventory choice or instance")
+        seen_ids.add(row["id"]); seen_items.add(row["item_uuid"])
+        if not isinstance(row["session_id"], str) or not 1 <= len(row["session_id"]) <= 128:
+            reject("invalid_snapshot", "inventory session missing")
+        if type(row["quantity"]) is not int or not 1 <= row["quantity"] <= 10000:
+            reject("invalid_snapshot", "inventory quantity unknown or out of bounds")
+        if (not isinstance(row["target_types"], list) or not row["target_types"]
+            or any(not isinstance(t,str) or t not in ("entity", "position") for t in row["target_types"])
+            or len(row["target_types"]) != len(set(row["target_types"]))):
+            reject("invalid_snapshot", "inventory target types unverified")
+        if "label" in row and (not isinstance(row["label"], str) or len(row["label"]) > 512):
+            reject("invalid_snapshot", "inventory label exceeds bound")
+        if "range" in row: row["range"] = number(row["range"], "throw_range", 0.1, 1000)
+        if "action_point_cost" in row and (type(row["action_point_cost"]) is not int or not 1 <= row["action_point_cost"] <= 10):
+            reject("invalid_snapshot", "throw cost unverified")
+        out.append(row)
+    return out
 
 
 def cast_options(value):
@@ -161,11 +199,14 @@ def observation(raw, actor_uuid=None):
         out = {k: copy.deepcopy(v) for k, v in value.items() if k in UNIT_FIELDS}
         if value.get("uuid") != (raw.get("actor") or {}).get("uuid"):
             out.pop("cast_options", None)
+            out.pop("inventory_options", None)
         elif "cast_options" in out:
             out["cast_options"] = cast_options(out["cast_options"])
+        if "inventory_options" in out:
+            out["inventory_options"] = inventory_options(out["inventory_options"], value["uuid"])
         if value.get("party_member") is not True or value.get("party_verified") is not True:
             # Visible opponents are observable, not inspectable private character sheets.
-            for key in ("resources", "spells", "spell_details", "cast_options", "host_owned", "avatar", "avatar_verified"):
+            for key in ("resources", "spells", "spell_details", "cast_options", "inventory_options", "host_owned", "avatar", "avatar_verified"):
                 out.pop(key, None)
         out["uuid"] = identifier(out.get("uuid"))
         if "position" in out:
@@ -230,6 +271,19 @@ def validate_context(state, actor_uuid, request):
         if (choice["spell_id"] if choice else request["spell_id"]) not in actor.get("spells", []):
             reject("unknown_spell", "actor does not know this spell")
     units = {u["uuid"]: u for u in [actor] + state["party"] + state["combatants"] + state["objects"]}
+    if kind == "throw":
+        options = [i for i in actor.get("inventory_options", []) if i["id"] == request["inventory_option_id"]]
+        if len(options) != 1: reject("unknown_inventory_option", "throw instance is not a current owned choice")
+        item = options[0]
+        if item["session_id"] != state["session_id"]:
+            reject("stale_inventory_option", "inventory choice belongs to another session")
+        if item["owner_uuid"] != actor_uuid or item["ownership_verified"] is not True or item["throw_eligible"] is not True:
+            reject("inventory_ownership_unknown", "throw ownership/eligibility is not established")
+        selection = request["target"]
+        if ("entity" if "entity_uuid" in selection else "position") not in item["target_types"]:
+            reject("invalid_target_type", "throw target selection is unsupported")
+        if "entity_uuid" in selection and selection["entity_uuid"] not in units:
+            reject("unknown_target", "throw target is outside current permitted observation")
     for key in ("target_uuid", "leader_uuid"):
         if key in request and request[key] not in units:
             reject("unknown_target", "target is not in this companion's current known state")

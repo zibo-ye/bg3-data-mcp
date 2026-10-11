@@ -25,6 +25,9 @@ Use versioned casts only when action_contract_versions and action_features expli
 Choose spell_option_id from the bound actor's current cast_options; never invent source metadata,
 slot levels or flags. Keep ordered target allocations within the observed budget and repeat policy.
 These options are currently simulation-only. Their presence does not validate native submission.
+Use throw only when its separate inventory feature is advertised. Select a current inventory_options
+token from your bound actor; do not invent raw item/source IDs or borrow another player's inventory.
+Preview validates the observation/action contract, not engine path, range or resource legality.
 """
 
 

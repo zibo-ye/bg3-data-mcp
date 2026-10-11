@@ -170,11 +170,11 @@ class CastV2Tests(unittest.TestCase):
         self.assertFalse(any(native.capabilities()['action_features'].values()))
         self.assertFalse(any(native.capabilities()['actions'].values()))
 
-    def test_throw_is_explicitly_unsupported_and_no_inventory_is_exposed(self):
+    def test_legacy_throw_fields_remain_unsupported_and_raw_inventory_is_not_exposed(self):
         with self.assertRaises(Rejected) as rejected:
             action({'kind':'throw','schema_version':2,'spell_option_id':'throw','item_uuid':ENEMY,'target':{'entity_uuid':FRIEND}})
-        self.assertEqual('unsupported_action',rejected.exception.code)
-        self.assertFalse(self.service.capabilities()['action_features']['throw_inventory_item'])
+        self.assertEqual('invalid_action',rejected.exception.code)
+        self.assertTrue(self.service.capabilities()['action_features']['throw_inventory_item'])
         self.backend.state['actor']['inventory_items']=[{'uuid':ENEMY,'private':'not validated'}]
         self.assertNotIn('inventory_items',self.service.observe()['actor'])
 

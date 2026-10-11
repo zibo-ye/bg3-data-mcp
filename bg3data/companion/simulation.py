@@ -14,6 +14,30 @@ ENEMY = "00000000-0000-0000-0000-000000000004"
 HIDDEN = "00000000-0000-0000-0000-000000000005"
 CHEST = "00000000-0000-0000-0000-000000000006"
 PLAYER3 = "00000000-0000-0000-0000-000000000007"
+THROW_WEAPON = "00000000-0000-0000-0000-000000000100"
+THROW_CONSUMABLE = "00000000-0000-0000-0000-000000000101"
+THROW_RETURNING = "00000000-0000-0000-0000-000000000102"
+
+
+def _inventory_identity(actor_uuid, item):
+    return "inventory_" + digest({"actor":actor_uuid, "instance":item})[:48]
+
+
+def _inventory_catalog_record(item):
+    return {k:copy.deepcopy(v) for k,v in item.items() if k not in ("session_id", "revision", "owner_uuid", "ownership_verified", "quantity")}
+
+
+def fixture_inventory():
+    out=[]
+    for uid,label,quantity,mode,returning,damage in (
+        (THROW_WEAPON,"Fixture throwing dagger",1,"weapon",False,5),
+        (THROW_CONSUMABLE,"Fixture throwable consumable",2,"consumable",False,4),
+        (THROW_RETURNING,"Fixture returning dagger",1,"weapon",True,5)):
+        out.append(dict(item_uuid=uid,label=label,quantity=quantity,session_id="offline-world-1",revision="inventory_1",
+                        owner_uuid=ACTOR,ownership_verified=True,throw_eligible=True,target_types=["entity","position"],
+                        _source_record="fixture_source_"+uid[-3:],_mode=mode,_return_to_owner=returning,
+                        _range=12,_damage=damage,_action_point_cost=1))
+    return out
 
 
 def _choice_identity(actor_uuid, option):
@@ -62,6 +86,7 @@ def unit(uid, name, x, z, party=False, avatar=False, owned=False):
 def fixture(combat=True):
     actor = unit(ACTOR, "Fourth companion", 0, 0, True, owned=True)
     actor["cast_options"] = fixture_cast_options()
+    actor["inventory_items"] = fixture_inventory()
     actor["spells"] += ["Fixture_HealingWord_Level3", "Projectile_MagicMissile", "Fixture_MagicMissile_Level3"]
     actor["relation"] = "self"
     host = unit(HOST, "Host", 1, 0, True, True, True)
@@ -98,22 +123,37 @@ class SimulationBackend:
         self.requests, self.receipts, self.submissions = {}, {}, []
         self.blocked, self.hazards = set(), set()
         self.tick = 0
+        if len(self.state['actor'].get('inventory_items',[]))>64:
+            raise Rejected('invalid_snapshot','fixture inventory exceeds bound')
         self.cast_catalog = {option["_source_record"]: _catalog_record(option)
                              for option in self.state["actor"].get("cast_options", []) if "_source_record" in option}
+        self.inventory_catalog = {item["item_uuid"]:_inventory_catalog_record(item) for item in self.state["actor"].get("inventory_items", [])}
+        self.world_items=[]
 
     def capabilities(self):
         return {"backend": "simulation", "normal_rules_validated": False, "simulation_only": True,
                 "actions": dict.fromkeys(ACTIONS, True), "action_contract_versions": [1, 2],
                 "action_features": {"cast_multiple_targets": True, "cast_upcast_options": True,
-                                    "throw_inventory_item": False, "dialogue_select": False},
+                                    "throw_inventory_item": True, "dialogue_select": False},
                 "limitations": ["deterministic scenario model; not proof of BG3 semantics"]}
 
     def observe(self, actor_uuid=None):
+        if len(self.state['actor'].get('inventory_items',[]))>64:
+            raise Rejected('invalid_snapshot','fixture inventory exceeds bound')
         for option in self.state["actor"].get("cast_options", []):
             # Bind token to current exact fixture source, session and revision;
             # metadata changes cannot silently reuse a formerly observed ID.
             option["id"] = _choice_identity(self.state["actor"]["uuid"], option)
         out = copy.deepcopy(self.state)
+        options=[]
+        for item in self.state["actor"].get("inventory_items", []):
+            if item.get("owner_uuid") != self.state["actor"]["uuid"] or item.get("ownership_verified") is not True or item.get("throw_eligible") is not True:
+                continue
+            if type(item.get("quantity")) is int and item["quantity"] == 0: continue
+            option={key:copy.deepcopy(item[key]) for key in ("session_id", "revision", "item_uuid", "label", "quantity", "owner_uuid", "ownership_verified", "throw_eligible", "target_types") if key in item}
+            option.update(id=_inventory_identity(self.state["actor"]["uuid"],item),range=item.get("_range"),action_point_cost=item.get("_action_point_cost"))
+            options.append(option)
+        out["actor"]["inventory_options"]=options
         if actor_uuid and actor_uuid != out["actor"]["uuid"]:
             out["actor"] = next((u for u in out["party"] if u["uuid"] == actor_uuid), None)
         return out
@@ -227,6 +267,43 @@ class SimulationBackend:
         else: event.update(target_uuid=value.get("target_uuid"), position=value.get("position"))
         events.append(event)
 
+    def _throw(self, actor, value, events):
+        items=[i for i in actor.get("inventory_items", []) if _inventory_identity(actor["uuid"],i)==value["inventory_option_id"]]
+        if len(items)!=1: raise Rejected("inventory_choice_changed", "exact item instance/stack changed before throw")
+        item=items[0]
+        if (item.get("session_id")!=self.state["session_id"] or item.get("owner_uuid")!=actor["uuid"]
+            or item.get("ownership_verified") is not True or item.get("throw_eligible") is not True
+            or self.inventory_catalog.get(item.get("item_uuid"))!=_inventory_catalog_record(item)):
+            raise Rejected("inventory_choice_changed", "item source/ownership changed before throw")
+        quantity=item.get("quantity")
+        if type(quantity) is not int or quantity<1: raise Rejected("item_unavailable", "item stack is empty or unknown")
+        if item['_mode'] not in ('weapon','consumable') or item['_mode']=='weapon' and quantity!=1:
+            raise Rejected("unsupported_item_stack", "fixture does not split weapon stacks")
+        selection=value['target']; target=self._units().get(selection.get('entity_uuid'))
+        destination=target['position'] if target else selection.get('position')
+        if target is not None and ('hp' not in target or target.get('dead') is not False):
+            raise Rejected('invalid_target','fixture throw requires living character or world position')
+        if destination is None or self._distance(actor['position'],destination)>item['_range']:
+            raise Rejected('out_of_range','throw target is outside fixture range')
+        if (round(destination['x']),round(destination['z'])) in self.blocked:
+            raise Rejected('path_unavailable','fixture throw destination is blocked')
+        resource=actor['resources'].get('ActionPoint',{}).get('0',{})
+        if resource.get('amount',0)<item['_action_point_cost']:
+            raise Rejected('insufficient_resources','throw cost cannot be paid')
+        # All instance, source, target and cost checks precede every mutation.
+        resource['amount']-=item['_action_point_cost']
+        disposition='returned' if item['_return_to_owner'] else ('consumed' if item['_mode']=='consumable' else 'dropped')
+        if disposition!='returned': item['quantity']-=1
+        if disposition=='dropped':
+            item['owner_uuid']=None; item['ownership_verified']=False
+            self.world_items.append(dict(item_uuid=item['item_uuid'],quantity=1,position=copy.deepcopy(destination)))
+        item['revision']='inventory_'+str(self.tick+2)
+        if target is not None:
+            target['hp']=max(0,target['hp']-item['_damage']); target['dead']=target['hp']==0
+        events.append(dict(kind='thrown',inventory_option_id=value['inventory_option_id'],item_uuid=item['item_uuid'],
+                           quantity_before=quantity,quantity_after=item['quantity'],disposition=disposition,
+                           target=copy.deepcopy(selection),destination=copy.deepcopy(destination)))
+
     def _execute(self, request_id):
         actor_uuid, value = self.requests[request_id]
         events = []
@@ -242,6 +319,8 @@ class SimulationBackend:
             kind = value["kind"]
             if kind == "cast":
                 self._cast(actor, value, events)
+            elif kind == "throw":
+                self._throw(actor, value, events)
             elif kind == "move":
                 self._move(actor, value["position"], events)
             elif kind == "end_turn":

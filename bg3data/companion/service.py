@@ -115,9 +115,11 @@ class CompanionService:
         if value.get("schema_version") == 2:
             if 2 not in capabilities["action_contract_versions"]:
                 reject("unsupported_action_version", "backend supports only v1 action contract")
-            if capabilities["action_features"]["cast_upcast_options"] is not True:
+            if value['kind']=='throw' and capabilities['action_features']['throw_inventory_item'] is not True:
+                reject('unsupported_action_feature','backend cannot throw verified inventory instances')
+            if value['kind']=='cast' and capabilities["action_features"]["cast_upcast_options"] is not True:
                 reject("unsupported_action_feature", "backend cannot resolve observed cast choices")
-            if len(value["targets"]) > 1 and capabilities["action_features"]["cast_multiple_targets"] is not True:
+            if value['kind']=='cast' and len(value["targets"]) > 1 and capabilities["action_features"]["cast_multiple_targets"] is not True:
                 reject("unsupported_action_feature", "backend cannot allocate multiple selections")
         validate_context(current, self.actor, value)
         if capabilities["actions"].get(value["kind"]) is not True:

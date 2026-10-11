@@ -92,3 +92,8 @@ that character's shared initiative turn. Similarly, Osiris movement and movement
 writes cannot be assumed to reproduce a player path request, movement budget or opportunity attacks.
 No native action is currently exposed by this fork. If a sufficient SE API is unavailable, evaluate
 a minimal native entry point against these same requirements; do not emulate legality by editing resources.
+
+
+## Queue trace sampling
+
+A request held in a queue is recorded once per continuous presence, keyed by queue and request GUID. A later complete sample may record `queue_departed`; it proves only observed absence, never consumption, rejection or success. Sampling is bounded to 96 companion entries and skips departure inference for incomplete samples. Queue and cast records preserve their separate network identity fields for inspection; those fields do not establish a validated mapping. Cast callbacks recheck companion ownership before recording. Fourteen mocked trace tests cover these limits; real engine callback timing and request-to-cast correlation remain unverified.

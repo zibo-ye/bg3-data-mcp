@@ -25,7 +25,7 @@ if operation == "install" then
     assert(BG3AC_Observer and BG3AC_Observer.epoch, "observe before tracing")
     actor_allowed()
     local trace = {actor_uuid=actor, session_id=BG3AC_Observer.epoch,
-        active=true, seq=0, records={}, errors={}, subscriptions={}, ticks=0}
+        active=true, seq=0, records={}, errors={}, subscriptions={}, ticks=0, queued={}}
     local function stop()
         trace.active = false
         for _, subscription in ipairs(trace.subscriptions) do pcall(Ext.Entity.Unsubscribe, subscription) end
@@ -51,9 +51,11 @@ if operation == "install" then
         end
     end
     local function cast_record(kind, e, component)
+        actor_allowed()
         local state = kind == "started" and component or e.SpellCastState
         if not state or id(state.Caster) ~= actor then return end
         record({kind=kind, actor_uuid=actor, cast_guid=tostring(state.SpellCastGuid),
+            cast_entity=tostring(e), net_guid=state.NetGuid and tostring(state.NetGuid) or nil,
             spell=tostring(state.SpellId.Prototype),
             result=kind ~= "started" and tostring(component.Result) or nil})
     end
@@ -63,18 +65,38 @@ if operation == "install" then
             if trace.ticks > 3600 then trace.expired=true; stop(); return end
             actor_allowed()
             local system = Ext.System.ServerCastRequest
+            local present = {}
+            local count = 0
             for _, queue_name in ipairs({"NetworkStartRequests", "CommandProtocolStartRequests"}) do
                 for _, request in ipairs(system[queue_name]) do
                     if id(request.Caster) == actor then
+                        count = count + 1
+                        if count > 96 then trace.truncated=true; break end
                         local spell = request.Spell
+                        local request_guid = tostring(request.RequestGuid)
+                        local key = queue_name .. ":" .. request_guid
+                        present[key] = {queue=queue_name, request_guid=request_guid}
+                        if not trace.queued[key] then
                         record({kind="queued", actor_uuid=actor, queue=queue_name,
-                            request_guid=tostring(request.RequestGuid), spell=tostring(spell.Prototype),
+                            request_guid=request_guid, spell=tostring(spell.Prototype),
+                            net_guid=request.NetGuid and tostring(request.NetGuid) or nil,
                             originator_prototype=tostring(spell.OriginatorPrototype),
                             source_type=tostring(spell.SourceType), source=tostring(spell.Source),
                             progression_source=tostring(spell.ProgressionSource),
                             cast_options=tostring(request.CastOptions)})
+                        end
                     end
                 end
+            end
+            -- Absence at a later sample does not prove consumption or success.
+            if count <= 96 then
+                for key, request in pairs(trace.queued) do
+                    if not present[key] then
+                        record({kind="queue_departed", actor_uuid=actor,
+                            queue=request.queue, request_guid=request.request_guid})
+                    end
+                end
+                trace.queued = present
             end
         end))
         for _, spec in ipairs({{"SpellCastState", "started"}, {"SpellCastOutcome", "outcome"}, {"SpellCastFinishedEvent", "finished"}}) do

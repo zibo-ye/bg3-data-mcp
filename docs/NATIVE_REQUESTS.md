@@ -7,7 +7,29 @@ The source audit is supplemented by the limited live observations below; request
 
 Independent balanced tutorial campaign, BG3 DX11 4.1.1.7631656 / SE 32. Protected system lookups confirm ServerCastRequest, ServerTurnOrder and ServerSightViewshed plus network/command cast and EndTurn arrays. Idle actor StartRequests was absent. A read-only OnSystemUpdate hook captured an ordinary UI Hide cast by recruited host-owned, non-avatar Lae'zel in NetworkStartRequests. The action resource decreased 1 to 0 and CastedSpell was observed.
 
-The request used Shout_Hide in Prototype and OriginatorPrototype; SourceType SpellSet; Source and ProgressionSource zero GUIDs; caster self-target with TargetingType Shout; Immediate and FromClient flags; empty NetGuid; generated RequestGuid; default originator metadata. No queue was modified. This example does not establish the proper metadata for other spells, submission legality or multiplayer authority. Local runtime evidence is retained by the consuming project's ignored artifacts/live directory, with findings in docs/LIVE_SESSION.md.
+The request used Shout_Hide in Prototype and OriginatorPrototype; SourceType SpellSet; Source and ProgressionSource zero GUIDs; caster self-target with TargetingType Shout; Immediate and FromClient flags; empty NetGuid; generated RequestGuid; default originator metadata. The initial capture did not modify a queue. This example does not establish the proper metadata for other spells, submission legality or multiplayer authority. Local runtime evidence is retained by the consuming project's ignored artifacts/live directory, with findings in docs/LIVE_SESSION.md.
+
+Subsequently, a typed Lua table using actual companion SpellBook metadata was appended to NetworkStartRequests while the companion had zero action points. Conversion and append succeeded (0→1); the engine consumed it, but no additional cast event or resource change occurred. No explicit rejection reason was captured, so this is not proof of an engine cost-check rejection. A separate EndTurn entity append was consumed and changed only that companion's RequestedEndTurn, leaving the allied player active in the same initiative group. No production action capability is enabled by these experiments.
+
+## Bounded developer trace
+
+`bg3data.companion.research.NativeRequestTrace` installs observation hooks only. It is intentionally absent from the restricted companion MCP. Use it during an authorized live test after obtaining a snapshot:
+
+```python
+from bg3data.companion.native import NativeBackend
+from bg3data.companion.research import NativeRequestTrace
+
+NativeBackend().observe(actor_uuid)
+trace = NativeRequestTrace()
+try:
+    trace.query(actor_uuid, "install")
+    # Perform a separately authorized test; the trace itself executes no action.
+    evidence = trace.query(actor_uuid, "read")
+finally:
+    evidence = trace.query(actor_uuid, "stop")
+```
+
+It rejects avatars, remote-owned and unrecruited actors; filters queue and cast records to the bound companion; records request and cast GUIDs separately; stops on session epoch changes, after 3600 system ticks or three errors; and retains at most 96 records. Partial installation rolls back subscriptions. Calling read/stop does not reinstall. Stopping preserves collected evidence. Offline Lua tests cover these invariants; actual component creation timing and metadata initialization remain unvalidated. A matching spell name, empty queue or unrelated CastedSpell event cannot by itself establish request completion.
 
 ## Confirmed exposure in source
 

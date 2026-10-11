@@ -36,7 +36,7 @@ class NativeRequestPreparation:
         actor_uuid, request_guid = identifier(actor_uuid), identifier(request_guid)
         if not isinstance(session_id, str) or not 1 <= len(session_id) <= 128:
             reject("invalid_session", "expected an observed engine session ID")
-        value = action(value)
+        value = action(value, supported_versions=(1,))
         if value["kind"] not in ("cast", "end_turn"):
             reject("unsupported_action", "native request preparation is not implemented for this action")
         if value["kind"] == "cast" and "position" in value:

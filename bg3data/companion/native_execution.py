@@ -18,7 +18,7 @@ class NativeResearchExecution:
         if not isinstance(session_id, str) or not 1 <= len(session_id) <= 128:
             reject("invalid_session", "expected observed session ID")
         if value is not None:
-            value = action(value)
+            value = action(value, supported_versions=(1,))
             if value["kind"] not in ("cast", "end_turn"):
                 reject("unsupported_action", "unsupported native research action")
             if value["kind"] == "cast":

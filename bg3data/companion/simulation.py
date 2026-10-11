@@ -5,7 +5,7 @@ import copy
 import math
 from collections import deque
 
-from .protocol import ACTIONS, Rejected, action, eligible, observation, validate_context
+from .protocol import ACTIONS, Rejected, action, digest, eligible, observation, validate_context
 
 HOST = "00000000-0000-0000-0000-000000000001"
 ACTOR = "00000000-0000-0000-0000-000000000002"
@@ -14,6 +14,35 @@ ENEMY = "00000000-0000-0000-0000-000000000004"
 HIDDEN = "00000000-0000-0000-0000-000000000005"
 CHEST = "00000000-0000-0000-0000-000000000006"
 PLAYER3 = "00000000-0000-0000-0000-000000000007"
+
+
+def _choice_identity(actor_uuid, option):
+    return "cast_" + digest({"actor": actor_uuid, "option": {k:v for k,v in option.items() if k != "id"}})[:48]
+
+
+def _catalog_record(option):
+    return {k:copy.deepcopy(v) for k,v in option.items() if k not in ("id", "session_id", "revision", "label")}
+
+
+def fixture_cast_options(session_id="offline-world-1", revision="spellbook_1"):
+    # Explicit fixture choices, not inferred native prototypes or source GUIDs.
+    definitions = [
+        ("Target_MainHandAttack", "weapon", None, 1, False, ["entity"], "fixture_weapon_a"),
+        ("Target_MainHandAttack", "weapon", None, 1, False, ["entity"], "fixture_weapon_b"),
+        ("Target_HealingWord", "spell_slot", 1, 1, False, ["entity"], "fixture_book_heal_1"),
+        ("Fixture_HealingWord_Level3", "spell_slot", 3, 1, False, ["entity"], "fixture_book_heal_3"),
+        ("Projectile_Fireball", "spell_slot", 3, 1, False, ["position"], "fixture_book_fireball"),
+        ("Projectile_MagicMissile", "spell_slot", 1, 3, True, ["entity"], "fixture_book_missiles_1"),
+        ("Fixture_MagicMissile_Level3", "spell_slot", 3, 5, True, ["entity"], "fixture_book_missiles_3"),
+    ]
+    options = []
+    for spell, mode, slot, budget, repeat, types, source in definitions:
+        option = dict(session_id=session_id, revision=revision, spell_id=spell, resource_mode=mode,
+                      max_targets=budget, repeat_targets=repeat, target_types=types, _source_record=source)
+        if slot is not None: option["slot_level"] = slot
+        option["id"] = _choice_identity(ACTOR, option)
+        options.append(option)
+    return options
 
 
 def unit(uid, name, x, z, party=False, avatar=False, owned=False):
@@ -32,6 +61,8 @@ def unit(uid, name, x, z, party=False, avatar=False, owned=False):
 
 def fixture(combat=True):
     actor = unit(ACTOR, "Fourth companion", 0, 0, True, owned=True)
+    actor["cast_options"] = fixture_cast_options()
+    actor["spells"] += ["Fixture_HealingWord_Level3", "Projectile_MagicMissile", "Fixture_MagicMissile_Level3"]
     actor["relation"] = "self"
     host = unit(HOST, "Host", 1, 0, True, True, True)
     friend = unit(FRIEND, "Friend", 2, 0, True, True)
@@ -56,6 +87,9 @@ class SimulationBackend:
         "Target_MainHandAttack": {"range": 1.5, "costs": [("ActionPoint", "0", 1)], "damage": 6, "relation": "enemy"},
         "Target_HealingWord": {"range": 18, "costs": [("BonusActionPoint", "0", 1), ("SpellSlot", "1", 1)], "heal": 5, "relation": "ally"},
         "Projectile_Fireball": {"range": 18, "costs": [("ActionPoint", "0", 1), ("SpellSlot", "3", 1)], "damage": 20, "radius": 3},
+        "Fixture_HealingWord_Level3": {"range": 18, "costs": [("BonusActionPoint", "0", 1), ("SpellSlot", "3", 1)], "heal": 10, "relation": "ally"},
+        "Projectile_MagicMissile": {"range": 18, "costs": [("ActionPoint", "0", 1), ("SpellSlot", "1", 1)], "damage": 4, "relation": "enemy", "multiple": True},
+        "Fixture_MagicMissile_Level3": {"range": 18, "costs": [("ActionPoint", "0", 1), ("SpellSlot", "3", 1)], "damage": 4, "relation": "enemy", "multiple": True},
     }
 
     def __init__(self, state=None, deferred=False):
@@ -64,12 +98,21 @@ class SimulationBackend:
         self.requests, self.receipts, self.submissions = {}, {}, []
         self.blocked, self.hazards = set(), set()
         self.tick = 0
+        self.cast_catalog = {option["_source_record"]: _catalog_record(option)
+                             for option in self.state["actor"].get("cast_options", []) if "_source_record" in option}
 
     def capabilities(self):
         return {"backend": "simulation", "normal_rules_validated": False, "simulation_only": True,
-                "actions": dict.fromkeys(ACTIONS, True), "limitations": ["deterministic scenario model; not proof of BG3 semantics"]}
+                "actions": dict.fromkeys(ACTIONS, True), "action_contract_versions": [1, 2],
+                "action_features": {"cast_multiple_targets": True, "cast_upcast_options": True,
+                                    "throw_inventory_item": False, "dialogue_select": False},
+                "limitations": ["deterministic scenario model; not proof of BG3 semantics"]}
 
     def observe(self, actor_uuid=None):
+        for option in self.state["actor"].get("cast_options", []):
+            # Bind token to current exact fixture source, session and revision;
+            # metadata changes cannot silently reuse a formerly observed ID.
+            option["id"] = _choice_identity(self.state["actor"]["uuid"], option)
         out = copy.deepcopy(self.state)
         if actor_uuid and actor_uuid != out["actor"]["uuid"]:
             out["actor"] = next((u for u in out["party"] if u["uuid"] == actor_uuid), None)
@@ -144,30 +187,45 @@ class SimulationBackend:
         events.append({"kind": "moved", "position": copy.deepcopy(position), "path_length": len(path)})
 
     def _cast(self, actor, value, events):
-        spell = self.SPELLS.get(value["spell_id"])
+        v2 = value.get("schema_version") == 2
+        choice = next((c for c in actor.get("cast_options", []) if c["id"] == value.get("spell_option_id")), None) if v2 else None
+        if v2 and (choice is None or choice["session_id"] != self.state["session_id"]
+                   or _choice_identity(actor["uuid"], choice) != value["spell_option_id"]
+                   or self.cast_catalog.get(choice.get("_source_record")) != _catalog_record(choice)):
+            raise Rejected("cast_choice_changed", "exact private fixture source/choice identity changed before costs")
+        spell_id = choice["spell_id"] if choice else value["spell_id"]
+        selections = value["targets"] if v2 else [{"entity_uuid":value["target_uuid"]} if "target_uuid" in value else {"position":value["position"]}]
+        spell = self.SPELLS.get(spell_id)
         if not spell:
             raise Rejected("unsupported_spell", "spell absent from simulation rules")
-        target = self._units().get(value.get("target_uuid"))
-        destination = target["position"] if target else value.get("position")
-        if destination is None or self._distance(actor["position"], destination) > spell["range"]:
-            raise Rejected("out_of_range", "spell target is out of range")
-        if "radius" not in spell:
-            if not target or target.get("dead") is not False:
-                raise Rejected("invalid_target", "requires a living entity target")
-            relation = "ally" if target.get("party_member") else target.get("relation")
-            if relation != spell["relation"]:
-                raise Rejected("invalid_target", "spell target relation is invalid")
+        targets = []
+        for selection in selections:
+            target = self._units().get(selection.get("entity_uuid"))
+            destination = target["position"] if target else selection.get("position")
+            if destination is None or self._distance(actor["position"], destination) > spell["range"]:
+                raise Rejected("out_of_range", "spell target is out of range")
+            if "radius" not in spell:
+                if not target or target.get("dead") is not False:
+                    raise Rejected("invalid_target", "requires a living entity target")
+                relation = "ally" if target.get("party_member") else target.get("relation")
+                if relation != spell["relation"]:
+                    raise Rejected("invalid_target", "spell target relation is invalid")
+                targets.append(target)
+            else:
+                targets.extend(u for u in self._units().values() if "hp" in u and self._distance(u["position"], destination) <= spell["radius"])
         for resource, level, amount in spell["costs"]:
             if actor["resources"].get(resource, {}).get(level, {}).get("amount", 0) < amount:
                 raise Rejected("insufficient_resources", "spell costs cannot be paid")
         # All legality/cost checks precede mutations; rejection has no partial deductions.
         for resource, level, amount in spell["costs"]:
             actor["resources"][resource][level]["amount"] -= amount
-        targets = [target] if "radius" not in spell else [u for u in self._units().values() if "hp" in u and self._distance(u["position"], destination) <= spell["radius"]]
         for u in targets:
             u["hp"] = min(u["max_hp"], max(0, u["hp"] + spell.get("heal", 0) - spell.get("damage", 0)))
             u["dead"] = u["hp"] == 0
-        events.append({"kind": "cast", "spell_id": value["spell_id"], "target_uuid": value.get("target_uuid"), "position": value.get("position")})
+        event = {"kind": "cast", "spell_id": spell_id}
+        if v2: event.update(spell_option_id=value["spell_option_id"], targets=copy.deepcopy(selections))
+        else: event.update(target_uuid=value.get("target_uuid"), position=value.get("position"))
+        events.append(event)
 
     def _execute(self, request_id):
         actor_uuid, value = self.requests[request_id]

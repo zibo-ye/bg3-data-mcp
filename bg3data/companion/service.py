@@ -40,6 +40,16 @@ class CompanionService:
         if capabilities.get("backend") not in ("simulation", "native"):
             reject("invalid_backend", "backend type is not declared")
         capabilities.update(schema_version=1, actions={k: capabilities.get("actions", {}).get(k, False) is True for k in ACTIONS})
+        versions = capabilities.get("action_contract_versions", [1])
+        capabilities["action_contract_versions"] = [v for v in (1, 2) if isinstance(versions, list) and any(type(x) is int and x == v for x in versions)]
+        features = capabilities.get("action_features", {})
+        capabilities["action_features"] = {key: isinstance(features, dict) and features.get(key) is True
+            for key in ("cast_multiple_targets", "cast_upcast_options", "throw_inventory_item", "dialogue_select")}
+        feature_authority = (capabilities["backend"] == "simulation" and capabilities.get("simulation_only") is True
+                             or capabilities["backend"] == "native" and capabilities.get("normal_rules_validated") is True)
+        if not feature_authority:
+            capabilities["action_contract_versions"] = [1]
+            capabilities["action_features"] = dict.fromkeys(capabilities["action_features"], False)
         # A native adapter must be validated before any action can be exposed.
         if capabilities["backend"] == "native" and capabilities.get("normal_rules_validated") is not True:
             capabilities["actions"] = dict.fromkeys(ACTIONS, False)
@@ -101,8 +111,16 @@ class CompanionService:
         current = self._snapshot(self.actor)
         if digest(current) != expected:
             reject("state_changed", "companion state changed; observe again")
+        capabilities = self.capabilities()
+        if value.get("schema_version") == 2:
+            if 2 not in capabilities["action_contract_versions"]:
+                reject("unsupported_action_version", "backend supports only v1 action contract")
+            if capabilities["action_features"]["cast_upcast_options"] is not True:
+                reject("unsupported_action_feature", "backend cannot resolve observed cast choices")
+            if len(value["targets"]) > 1 and capabilities["action_features"]["cast_multiple_targets"] is not True:
+                reject("unsupported_action_feature", "backend cannot allocate multiple selections")
         validate_context(current, self.actor, value)
-        if self.capabilities()["actions"].get(value["kind"]) is not True:
+        if capabilities["actions"].get(value["kind"]) is not True:
             reject("unsupported_action", "action backend is unavailable or unvalidated")
         return current
 
